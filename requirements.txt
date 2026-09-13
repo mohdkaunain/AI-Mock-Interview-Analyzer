@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+joblib
+PyMuPDF
+SpeechRecognition
+scikit-learn
+plotly
