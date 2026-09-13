@@ -71,42 +71,128 @@ def convert_audio_to_text(audio_bytes):
 
 
 def ai_assistance_check(answer):
-    """Heuristic indicator only; it does not prove AI authorship."""
-    words = re.findall(r"\b\w+\b", answer.lower())
+    """
+    Explainable AI-assistance heuristic.
+    It estimates whether an answer has unusually AI-like writing patterns.
+    It does NOT prove that AI was used.
+    """
+    text = re.sub(r"\s+", " ", answer.strip().lower())
+    words = re.findall(r"[a-zA-Z']+", text)
     n = len(words)
-    if n < 12:
-        return 0.0, "Insufficient text"
 
-    formal = [
+    if n < 20:
+        return {
+            "score": 0.0,
+            "label": "Insufficient Text",
+            "reasons": ["Answer is too short for a reliable writing-pattern check."]
+        }
+
+    sentences = [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
+    sent_lengths = [
+        len(re.findall(r"[a-zA-Z']+", s)) for s in sentences
+    ]
+
+    # 1. Formulaic / textbook transition phrases
+    formulaic = [
         "in conclusion", "furthermore", "moreover", "therefore",
         "consequently", "in summary", "it is important to note",
-        "plays a crucial role", "overall"
+        "plays a crucial role", "overall", "firstly", "secondly",
+        "thirdly", "on the other hand", "in contrast",
+        "for example", "in other words"
     ]
-    structure = [
-        "firstly", "secondly", "thirdly", "however", "for example",
-        "in contrast", "on the other hand"
-    ]
-    formal_hits = sum(p in answer.lower() for p in formal)
-    structure_hits = sum(p in answer.lower() for p in structure)
-    punctuation = sum(answer.count(x) for x in [",", ";", ":"])
+    formula_hits = sum(text.count(p) for p in formulaic)
 
-    long_ratio = sum(len(w) >= 9 for w in words) / n
-    score = (
-        0.30 * min(formal_hits / 2, 1) +
-        0.20 * min(structure_hits / 2, 1) +
-        0.20 * min(punctuation / 8, 1) +
-        0.30 * min(long_ratio / 0.22, 1)
+    # 2. Very regular sentence lengths
+    regularity = 0.0
+    if len(sent_lengths) >= 3 and sum(sent_lengths) > 0:
+        mean_len = np.mean(sent_lengths)
+        cv = np.std(sent_lengths) / max(mean_len, 1)
+        regularity = float(np.clip((0.38 - cv) / 0.38, 0, 1))
+
+    # 3. Vocabulary/style characteristics
+    lexical_diversity = len(set(words)) / max(n, 1)
+    repetitive_style = float(np.clip((0.72 - lexical_diversity) / 0.25, 0, 1))
+
+    avg_word_len = np.mean([len(w) for w in words])
+    formal_vocabulary = float(np.clip((avg_word_len - 5.2) / 2.0, 0, 1))
+
+    # 4. Highly polished structure: many explanatory connectors
+    connectors = [
+        "because", "while", "which", "whereas", "then", "finally",
+        "however", "also", "first", "second", "third"
+    ]
+    connector_hits = sum(
+        len(re.findall(r"\b" + re.escape(p) + r"\b", text))
+        for p in connectors
     )
-    score = float(np.clip(score, 0, 1))
+    structured_explanation = float(
+        np.clip((connector_hits + formula_hits) / 8.0, 0, 1)
+    )
 
-    if score >= 0.72:
+    # 5. Lack of personal/contextual language.
+    # This is only a weak signal because technical answers are often impersonal.
+    personal_markers = [
+        "i ", "i'm", "i've", "my ", "me ", "we ", "our ",
+        "in my experience", "for example, in my project",
+        "i implemented", "i worked", "i used"
+    ]
+    personal_hits = sum(text.count(p) for p in personal_markers)
+    low_personal_context = 1.0 if personal_hits == 0 and n >= 60 else 0.0
+
+    # 6. Generic textbook openings/closings.
+    textbook = [
+        "a process is", "a thread is", "the four",
+        "when i type a url", "in short", "in summary",
+        "this means", "this allows", "the operating system"
+    ]
+    textbook_hits = sum(text.count(p) for p in textbook)
+    textbook_style = float(np.clip(textbook_hits / 3.0, 0, 1))
+
+    # Weighted heuristic score.
+    raw = (
+        0.22 * min(formula_hits / 2.0, 1.0) +
+        0.18 * regularity +
+        0.14 * repetitive_style +
+        0.12 * formal_vocabulary +
+        0.14 * structured_explanation +
+        0.08 * low_personal_context +
+        0.12 * textbook_style
+    )
+
+    score = float(np.clip(raw * 100, 0, 100))
+
+    reasons = []
+    if formula_hits:
+        reasons.append("Uses formal/formulaic transition phrases.")
+    if regularity >= 0.55:
+        reasons.append("Sentence lengths are unusually consistent.")
+    if repetitive_style >= 0.50:
+        reasons.append("Vocabulary shows a repetitive/textbook pattern.")
+    if formal_vocabulary >= 0.55:
+        reasons.append("Writing uses relatively formal, long-word vocabulary.")
+    if structured_explanation >= 0.55:
+        reasons.append("Answer follows a highly structured explanatory style.")
+    if low_personal_context:
+        reasons.append("Contains little personal or project-specific context.")
+    if textbook_style >= 0.34:
+        reasons.append("Contains textbook-style answer patterns.")
+
+    if score >= 65:
         label = "AI Assistance Suspected"
-    elif score >= 0.50:
+    elif score >= 45:
         label = "Possible AI Assistance"
     else:
         label = "No Strong AI Pattern"
 
-    return score, label
+    if not reasons:
+        reasons = ["No strong AI-like writing signals were found."]
+
+    return {
+        "score": score,
+        "label": label,
+        "reasons": reasons[:4]
+    }
+
 
 def calculate_nlp_features(answer, expected):
     tokens=[w.lower() for w in answer.split() if len(w)>1]
@@ -212,7 +298,7 @@ else:
         with col2:
             st.subheader("Question-Wise Score Audit")
             table=pd.DataFrame([{"Question":e["question"][:40]+"...","Candidate Answer":e.get("final_text","")[:40]+"...","Score":f"{e['score']:.1f}","Concept Match":f"{e['metrics']['concept_coverage']*100:.1f}%",
-                     "AI Check":e["metrics"].get("ai_assistance_label","N/A")} for e in st.session_state.evaluations])
+                     "AI Check":f"{e['metrics'].get('ai_assistance_label','N/A')} ({e['metrics'].get('ai_assistance_score',0):.0f}%)"} for e in st.session_state.evaluations])
             st.dataframe(table,use_container_width=True)
         if st.button("🔄 Start New Interview",type="primary"):
             for k,v in defaults.items(): st.session_state[k]=v
@@ -241,17 +327,29 @@ else:
             with st.spinner("The ML model is evaluating and saving the answer..."):
                 feats,metrics=calculate_nlp_features(final,q["expected_concepts"])
                 score=float(np.clip(eval_model.predict(feats)[0],0,100))
-                ai_score, ai_label = ai_assistance_check(final)
-                metrics["ai_assistance_score"] = ai_score
-                metrics["ai_assistance_label"] = ai_label
+                ai_result = ai_assistance_check(final)
+                metrics["ai_assistance_score"] = ai_result["score"]
+                metrics["ai_assistance_label"] = ai_result["label"]
+                metrics["ai_assistance_reasons"] = ai_result["reasons"]
                 st.session_state.evaluations.append({"question":q["question"],"final_text":final,"score":round(score,1),"metrics":metrics})
             st.success(f'✅ Answer Saved! Transcribed Text: "{final}"')
             st.info(f"Predicted Score: **{score:.1f} / 100**")
-            if ai_label == "AI Assistance Suspected":
-                st.warning(f"⚠️ **{ai_label}** — This is a heuristic indicator, not proof that AI was used.")
-            elif ai_label == "Possible AI Assistance":
-                st.warning(f"⚠️ **{ai_label}** — Review the answer if needed.")
+            ai_result = ai_assistance_check(final)
+            if ai_result["label"] == "AI Assistance Suspected":
+                st.warning(
+                    f"⚠️ **AI Assistance Suspected — {ai_result['score']:.0f}%** "
+                    "This is a writing-pattern estimate, not proof of AI use."
+                )
+                st.caption(" • ".join(ai_result["reasons"]))
+            elif ai_result["label"] == "Possible AI Assistance":
+                st.warning(
+                    f"⚠️ **Possible AI Assistance — {ai_result['score']:.0f}%** "
+                    "Review this answer if needed."
+                )
+                st.caption(" • ".join(ai_result["reasons"]))
             else:
-                st.success("✅ No strong AI-writing pattern detected.")
+                st.success(
+                    f"✅ **No Strong AI Pattern — {ai_result['score']:.0f}%**"
+                )
             st.session_state.current_q_idx+=1
             st.rerun()
