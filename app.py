@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd, numpy as np, joblib, fitz, re, tempfile
 import speech_recognition as sr
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -68,6 +69,45 @@ def convert_audio_to_text(audio_bytes):
                 import os; os.remove(path)
             except OSError: pass
 
+
+def ai_assistance_check(answer):
+    """Heuristic indicator only; it does not prove AI authorship."""
+    words = re.findall(r"\b\w+\b", answer.lower())
+    n = len(words)
+    if n < 12:
+        return 0.0, "Insufficient text"
+
+    formal = [
+        "in conclusion", "furthermore", "moreover", "therefore",
+        "consequently", "in summary", "it is important to note",
+        "plays a crucial role", "overall"
+    ]
+    structure = [
+        "firstly", "secondly", "thirdly", "however", "for example",
+        "in contrast", "on the other hand"
+    ]
+    formal_hits = sum(p in answer.lower() for p in formal)
+    structure_hits = sum(p in answer.lower() for p in structure)
+    punctuation = sum(answer.count(x) for x in [",", ";", ":"])
+
+    long_ratio = sum(len(w) >= 9 for w in words) / n
+    score = (
+        0.30 * min(formal_hits / 2, 1) +
+        0.20 * min(structure_hits / 2, 1) +
+        0.20 * min(punctuation / 8, 1) +
+        0.30 * min(long_ratio / 0.22, 1)
+    )
+    score = float(np.clip(score, 0, 1))
+
+    if score >= 0.72:
+        label = "AI Assistance Suspected"
+    elif score >= 0.50:
+        label = "Possible AI Assistance"
+    else:
+        label = "No Strong AI Pattern"
+
+    return score, label
+
 def calculate_nlp_features(answer, expected):
     tokens=[w.lower() for w in answer.split() if len(w)>1]
     length=len(tokens)
@@ -85,6 +125,9 @@ def calculate_nlp_features(answer, expected):
 defaults={"interview_started":False,"current_q_idx":0,"selected_questions":[],"evaluations":[],"profile":None}
 for k,v in defaults.items():
     if k not in st.session_state: st.session_state[k]=v
+if "tab_switches" not in st.session_state:
+    st.session_state.tab_switches = 0
+
 
 if not st.session_state.interview_started:
     st.subheader("📄 Step 1: Candidate Verification & Resume Analysis")
@@ -122,9 +165,26 @@ if not st.session_state.interview_started:
             st.session_state.interview_started=True
             st.session_state.current_q_idx=0
             st.session_state.evaluations=[]
+            st.session_state.tab_switches=0
             st.rerun()
 
 else:
+    # Browser-side focus/visibility monitor. It can warn that the interview
+    # page was left, but cannot identify which other website was opened.
+    st.markdown("""
+    <script>
+    (function() {
+      if (window.__tabWarnInstalled) return;
+      window.__tabWarnInstalled = true;
+      document.addEventListener("visibilitychange", function() {
+        if (document.visibilityState === "hidden") {
+          console.log("Interview tab left");
+        }
+      });
+    })();
+    </script>
+    """, unsafe_allow_html=True)
+
     qs=st.session_state.selected_questions
     idx=st.session_state.current_q_idx
 
@@ -151,13 +211,16 @@ else:
             st.plotly_chart(fig,use_container_width=True)
         with col2:
             st.subheader("Question-Wise Score Audit")
-            table=pd.DataFrame([{"Question":e["question"][:40]+"...","Candidate Answer":e.get("final_text","")[:40]+"...","Score":f"{e['score']:.1f}","Concept Match":f"{e['metrics']['concept_coverage']*100:.1f}%"} for e in st.session_state.evaluations])
+            table=pd.DataFrame([{"Question":e["question"][:40]+"...","Candidate Answer":e.get("final_text","")[:40]+"...","Score":f"{e['score']:.1f}","Concept Match":f"{e['metrics']['concept_coverage']*100:.1f}%",
+                     "AI Check":e["metrics"].get("ai_assistance_label","N/A")} for e in st.session_state.evaluations])
             st.dataframe(table,use_container_width=True)
         if st.button("🔄 Start New Interview",type="primary"):
             for k,v in defaults.items(): st.session_state[k]=v
+            st.session_state.tab_switches=0
             st.rerun()
         st.stop()
 
+    st.caption("🛡️ Interview monitoring: leaving this page may be detectable by the browser. The app cannot identify whether another tab is ChatGPT, Google, or another site.")
     q=qs[idx]
     st.progress((idx+1)/len(qs))
     st.caption(f"Question {idx+1} of {len(qs)} | Category: {q['category']} | Level: {q['difficulty']}")
@@ -178,8 +241,17 @@ else:
             with st.spinner("The ML model is evaluating and saving the answer..."):
                 feats,metrics=calculate_nlp_features(final,q["expected_concepts"])
                 score=float(np.clip(eval_model.predict(feats)[0],0,100))
+                ai_score, ai_label = ai_assistance_check(final)
+                metrics["ai_assistance_score"] = ai_score
+                metrics["ai_assistance_label"] = ai_label
                 st.session_state.evaluations.append({"question":q["question"],"final_text":final,"score":round(score,1),"metrics":metrics})
             st.success(f'✅ Answer Saved! Transcribed Text: "{final}"')
             st.info(f"Predicted Score: **{score:.1f} / 100**")
+            if ai_label == "AI Assistance Suspected":
+                st.warning(f"⚠️ **{ai_label}** — This is a heuristic indicator, not proof that AI was used.")
+            elif ai_label == "Possible AI Assistance":
+                st.warning(f"⚠️ **{ai_label}** — Review the answer if needed.")
+            else:
+                st.success("✅ No strong AI-writing pattern detected.")
             st.session_state.current_q_idx+=1
             st.rerun()
