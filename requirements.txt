@@ -6,3 +6,5 @@ PyMuPDF
 SpeechRecognition
 scikit-learn
 plotly
+streamlit-webrtc
+av
