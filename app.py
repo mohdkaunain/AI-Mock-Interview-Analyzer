@@ -10,21 +10,13 @@ SAPLING_API_KEY = st.secrets.get("SAPLING_API_KEY", "")
 SAPLING_URL = "https://api.sapling.ai/api/v1/aidetect"
 
 def detect_ai_sapling(answer):
-    """
-    Enhanced Sapling AI Detector:
-    Evaluates both overall score and sentence-level probabilities so that
-    concise or bulleted ChatGPT responses do not slip through as 0%.
-    """
     if not answer or len(answer.split()) < 4:
         return {"score": 0.0, "label": "No Strong AI Pattern", "reasons": ["Answer is too short."]}
 
     if not SAPLING_API_KEY:
         return {"score": 0.0, "label": "API Key Missing", "reasons": ["SAPLING_API_KEY not configured in Secrets."]}
 
-    payload = {
-        "key": SAPLING_API_KEY,
-        "text": answer
-    }
+    payload = {"key": SAPLING_API_KEY, "text": answer}
 
     try:
         res = requests.post(SAPLING_URL, json=payload, timeout=6)
@@ -32,7 +24,6 @@ def detect_ai_sapling(answer):
             data = res.json()
             overall_score = float(data.get("score", 0.0))
             
-            # Sentence-level scores inspection
             sentence_scores = []
             for item in data.get("sentence_scores", []):
                 if isinstance(item, dict) and "score" in item:
@@ -169,17 +160,30 @@ else:
         scores = [e["score"] for e in st.session_state.evaluations]
         rel = [e["metrics"]["relevance"] * 100 for e in st.session_state.evaluations]
         cov = [e["metrics"]["concept_coverage"] * 100 for e in st.session_state.evaluations]
-        avg_score, avg_rel, avg_cov = float(np.mean(scores)), float(np.mean(rel)), float(np.mean(cov))
+        ai_scores = [e["metrics"].get("ai_assistance_score", 0.0) for e in st.session_state.evaluations]
+
+        avg_score = float(np.mean(scores)) if scores else 0
+        avg_rel = float(np.mean(rel)) if rel else 0
+        avg_cov = float(np.mean(cov)) if cov else 0
+        avg_ai = float(np.mean(ai_scores)) if ai_scores else 0
+
+        # --- CANDIDATE VERDICT LOGIC (Pass / Fail by AI usage) ---
+        if avg_ai >= 40.0:
+            st.error(f"❌ **STATUS: FAILED / DISQUALIFIED** (AI Assistance: {avg_ai:.1f}%)")
+            st.warning("⚠️ **Reason:** Unusually high AI assistance/ChatGPT usage detected across responses. The interview requires authentic, personal technical explanation.")
+        else:
+            st.success(f"✅ **STATUS: PASSED / SHORTLISTED** (AI Assistance: {avg_ai:.1f}%)")
+            st.info("🎯 **Verdict:** Excellent preparation! Authentic technical depth demonstrated with no significant AI dependence.")
         
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Overall Score", f"{avg_score:.1f} / 100")
         c2.metric("Concept Coverage", f"{avg_cov:.1f}%")
         c3.metric("Semantic Relevance", f"{avg_rel:.1f}%")
-        c4.metric("Questions Evaluated", f"{len(qs)}")
+        c4.metric("Avg AI Detected", f"{avg_ai:.1f}%", delta="Flagged" if avg_ai >= 40 else "Authentic", delta_color="inverse")
         
         col1, col2 = st.columns([1, 1])
         with col1:
-            fig = go.Figure(data=go.Scatterpolar(r=[avg_score, avg_rel, avg_cov, min(100, avg_score + 4)], theta=["Technical Score", "Relevance", "Concept Coverage", "Depth"], fill="toself", line_color="#008080"))
+            fig = go.Figure(data=go.Scatterpolar(r=[avg_score, avg_rel, avg_cov, max(0, 100 - avg_ai)], theta=["Technical Score", "Relevance", "Concept Coverage", "Human Authenticity"], fill="toself", line_color="#008080"))
             fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
         with col2:
@@ -217,7 +221,7 @@ else:
                 feats, metrics = calculate_nlp_features(final, q["expected_concepts"])
                 score = float(np.clip(eval_model.predict(feats)[0], 0, 100))
                 
-                # Direct Sapling AI API Call (Overall + Sentence-Level)
+                # Direct Sapling AI API Call
                 ai_result = detect_ai_sapling(final)
                 metrics["ai_assistance_score"] = ai_result["score"]
                 metrics["ai_assistance_label"] = ai_result["label"]
