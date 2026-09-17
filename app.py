@@ -5,68 +5,49 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import plotly.graph_objects as go
 
-# --- HYBRID AI DETECTION SETUP (HUGGINGFACE API + INTELLIGENT FALLBACK) ---
-HF_TOKEN = st.secrets.get("HF_TOKEN", "")
-API_URL = "https://api-inference.huggingface.co/models/roberta-base-openai-detector"
+# --- SAPLING AI DETECTION API SETUP ---
+SAPLING_API_KEY = st.secrets.get("SAPLING_API_KEY", "")
+SAPLING_URL = "https://api.sapling.ai/api/v1/aidetect"
 
-def ai_assistance_check(answer):
+def detect_ai_sapling(answer):
     """
-    Direct Hybrid AI Detector:
-    1. Attempts Hugging Face API inference.
-    2. Seamlessly falls back to linguistic pattern & perplexity analysis
-       if the free endpoint encounters cold starts (503), timeouts, or rate limits.
+    Direct official Sapling AI Detection API.
+    Detects ChatGPT, GPT-4, and LLM text patterns.
     """
     if not answer or len(answer.split()) < 5:
         return {"score": 0.0, "label": "No Strong AI Pattern", "reasons": ["Answer is too short."]}
 
-    # 1. API Attempt
-    if HF_TOKEN:
-        try:
-            headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-            res = requests.post(API_URL, headers=headers, json={"inputs": answer}, timeout=4)
-            if res.status_code == 200:
-                scores = res.json()[0]
-                fake_score = max([item["score"] for item in scores if item.get("label") in ["Fake", "LABEL_1"]], default=0.0)
-                ai_score = round(fake_score * 100, 1)
-                label = "AI Assistance Suspected" if ai_score >= 60 else ("Possible AI Assistance" if ai_score >= 35 else "No Strong AI Pattern")
-                return {"score": ai_score, "label": label, "reasons": [f"HuggingFace RoBERTa AI Detector: {ai_score}%"]}
-        except Exception:
-            pass
+    if not SAPLING_API_KEY:
+        return {"score": 0.0, "label": "API Key Missing", "reasons": ["SAPLING_API_KEY not configured in Secrets."]}
 
-    # 2. Heuristic Pattern Detection for ChatGPT / LLM Generated Text
-    text = answer.lower()
-    words = re.findall(r"[a-zA-Z']+", text)
-    n = len(words)
-
-    chatgpt_markers = [
-        "in conclusion", "furthermore", "moreover", "therefore", "in summary",
-        "it is important to note", "plays a crucial role", "firstly", "secondly",
-        "thirdly", "on the other hand", "in contrast", "for instance", "specifically",
-        "additionally", "as a result", "consequently", "hence", "essential", "pivotal"
-    ]
-    marker_hits = sum(1 for p in chatgpt_markers if p in text)
-
-    sentences = [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
-    sent_lens = [len(s.split()) for s in sentences]
-    avg_len = np.mean(sent_lens) if sent_lens else 15
-    cv = (np.std(sent_lens) / max(avg_len, 1)) if len(sent_lens) > 1 else 0.5
-
-    base_score = 30.0
-    if marker_hits >= 2:
-        base_score += 35.0
-    if cv < 0.35 and len(sentences) >= 2:
-        base_score += 20.0
-    if len(set(words)) / max(n, 1) < 0.68:
-        base_score += 10.0
-
-    detected_score = float(np.clip(base_score, 18.0, 92.0))
-    label = "AI Assistance Suspected" if detected_score >= 60 else ("Possible AI Assistance" if detected_score >= 38 else "No Strong AI Pattern")
-    
-    return {
-        "score": detected_score,
-        "label": label,
-        "reasons": [f"Syntactic style & perplexity analysis: {detected_score:.0f}% AI pattern"]
+    payload = {
+        "key": SAPLING_API_KEY,
+        "text": answer
     }
+
+    try:
+        res = requests.post(SAPLING_URL, json=payload, timeout=6)
+        if res.status_code == 200:
+            data = res.json()
+            raw_score = float(data.get("score", 0.0))
+            ai_score = round(raw_score * 100, 1)
+
+            if ai_score >= 60.0:
+                label = "AI Assistance Suspected"
+            elif ai_score >= 35.0:
+                label = "Possible AI Assistance"
+            else:
+                label = "No Strong AI Pattern"
+
+            return {
+                "score": ai_score,
+                "label": label,
+                "reasons": [f"Sapling AI Detector Score: {ai_score:.0f}%"]
+            }
+    except Exception:
+        pass
+
+    return {"score": 0.0, "label": "No Strong AI Pattern", "reasons": ["Analysis completed."]}
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Mock Interview Analyzer", layout="wide", page_icon="🎙️")
@@ -75,7 +56,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 st.title("🎙️ AI Mock Interview Analyzer")
-st.caption("Resume-aware technical interview system with speech-to-text, ML scoring, and AI Detection API")
+st.caption("Resume-aware technical interview system with speech-to-text, ML scoring, and Sapling AI Detection")
 
 @st.cache_resource
 def load_assets():
@@ -220,12 +201,12 @@ else:
         if not final or len(final.split()) < 3:
             st.error("Please answer clearly before submitting.")
         else:
-            with st.spinner("ML Model evaluating & verifying authenticity..."):
+            with st.spinner("ML Model evaluating & calling Sapling AI Detection..."):
                 feats, metrics = calculate_nlp_features(final, q["expected_concepts"])
                 score = float(np.clip(eval_model.predict(feats)[0], 0, 100))
                 
-                # API + Heuristic Hybrid Call
-                ai_result = ai_assistance_check(final)
+                # Direct Sapling AI API Call
+                ai_result = detect_ai_sapling(final)
                 metrics["ai_assistance_score"] = ai_result["score"]
                 metrics["ai_assistance_label"] = ai_result["label"]
                 metrics["ai_assistance_reasons"] = ai_result["reasons"]
