@@ -5,16 +5,17 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import plotly.graph_objects as go
 
-# --- SAPLING AI DETECTION API SETUP ---
+# --- ENHANCED SAPLING AI DETECTION API SETUP ---
 SAPLING_API_KEY = st.secrets.get("SAPLING_API_KEY", "")
 SAPLING_URL = "https://api.sapling.ai/api/v1/aidetect"
 
 def detect_ai_sapling(answer):
     """
-    Direct official Sapling AI Detection API.
-    Detects ChatGPT, GPT-4, and LLM text patterns.
+    Enhanced Sapling AI Detector:
+    Evaluates both overall score and sentence-level probabilities so that
+    concise or bulleted ChatGPT responses do not slip through as 0%.
     """
-    if not answer or len(answer.split()) < 5:
+    if not answer or len(answer.split()) < 4:
         return {"score": 0.0, "label": "No Strong AI Pattern", "reasons": ["Answer is too short."]}
 
     if not SAPLING_API_KEY:
@@ -29,12 +30,23 @@ def detect_ai_sapling(answer):
         res = requests.post(SAPLING_URL, json=payload, timeout=6)
         if res.status_code == 200:
             data = res.json()
-            raw_score = float(data.get("score", 0.0))
-            ai_score = round(raw_score * 100, 1)
+            overall_score = float(data.get("score", 0.0))
+            
+            # Sentence-level scores inspection
+            sentence_scores = []
+            for item in data.get("sentence_scores", []):
+                if isinstance(item, dict) and "score" in item:
+                    sentence_scores.append(float(item["score"]))
+                elif isinstance(item, (int, float)):
+                    sentence_scores.append(float(item))
 
-            if ai_score >= 60.0:
+            max_sent_score = max(sentence_scores) if sentence_scores else 0.0
+            effective_score = max(overall_score, max_sent_score)
+            ai_score = round(effective_score * 100, 1)
+
+            if ai_score >= 50.0:
                 label = "AI Assistance Suspected"
-            elif ai_score >= 35.0:
+            elif ai_score >= 25.0:
                 label = "Possible AI Assistance"
             else:
                 label = "No Strong AI Pattern"
@@ -42,7 +54,7 @@ def detect_ai_sapling(answer):
             return {
                 "score": ai_score,
                 "label": label,
-                "reasons": [f"Sapling AI Detector Score: {ai_score:.0f}%"]
+                "reasons": [f"Sapling AI Confidence: {ai_score:.0f}%"]
             }
     except Exception:
         pass
@@ -205,7 +217,7 @@ else:
                 feats, metrics = calculate_nlp_features(final, q["expected_concepts"])
                 score = float(np.clip(eval_model.predict(feats)[0], 0, 100))
                 
-                # Direct Sapling AI API Call
+                # Direct Sapling AI API Call (Overall + Sentence-Level)
                 ai_result = detect_ai_sapling(final)
                 metrics["ai_assistance_score"] = ai_result["score"]
                 metrics["ai_assistance_label"] = ai_result["label"]
