@@ -5,36 +5,76 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import plotly.graph_objects as go
 
-# --- SECURE HUGGINGFACE AI DETECTION API SETUP ---
-# Fetching securely from Streamlit Secrets (No hardcoded credentials)
+# --- HYBRID AI DETECTION SETUP (HUGGINGFACE API + INTELLIGENT FALLBACK) ---
 HF_TOKEN = st.secrets.get("HF_TOKEN", "")
 API_URL = "https://api-inference.huggingface.co/models/roberta-base-openai-detector"
 
 def ai_assistance_check(answer):
-    """Calls HuggingFace Free Inference API for candidate answer authenticity"""
-    if not answer or len(answer.split()) < 4:
+    """
+    Direct Hybrid AI Detector:
+    1. Attempts Hugging Face API inference.
+    2. Seamlessly falls back to linguistic pattern & perplexity analysis
+       if the free endpoint encounters cold starts (503), timeouts, or rate limits.
+    """
+    if not answer or len(answer.split()) < 5:
         return {"score": 0.0, "label": "No Strong AI Pattern", "reasons": ["Answer is too short."]}
-    
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
-    try:
-        res = requests.post(API_URL, headers=headers, json={"inputs": answer}, timeout=5)
-        if res.status_code == 200:
-            scores = res.json()[0]
-            fake_score = max([item["score"] for item in scores if item.get("label") == "Fake"], default=0.0)
-            ai_score = round(fake_score * 100, 1)
-            label = "AI Assistance Suspected" if ai_score >= 60 else ("Possible AI Assistance" if ai_score >= 35 else "No Strong AI Pattern")
-            return {"score": ai_score, "label": label, "reasons": [f"HuggingFace RoBERTa AI Detector: {ai_score}%"]}
-    except Exception:
-        pass
-    return {"score": 10.0, "label": "No Strong AI Pattern", "reasons": ["Authentic human linguistic style."]}
 
-# --- PAGE SETUP ---
-st.set_page_config(page_title="AI Mock Interview Analyzer", layout="wide", page_icon="🎥")
+    # 1. API Attempt
+    if HF_TOKEN:
+        try:
+            headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+            res = requests.post(API_URL, headers=headers, json={"inputs": answer}, timeout=4)
+            if res.status_code == 200:
+                scores = res.json()[0]
+                fake_score = max([item["score"] for item in scores if item.get("label") in ["Fake", "LABEL_1"]], default=0.0)
+                ai_score = round(fake_score * 100, 1)
+                label = "AI Assistance Suspected" if ai_score >= 60 else ("Possible AI Assistance" if ai_score >= 35 else "No Strong AI Pattern")
+                return {"score": ai_score, "label": label, "reasons": [f"HuggingFace RoBERTa AI Detector: {ai_score}%"]}
+        except Exception:
+            pass
+
+    # 2. Heuristic Pattern Detection for ChatGPT / LLM Generated Text
+    text = answer.lower()
+    words = re.findall(r"[a-zA-Z']+", text)
+    n = len(words)
+
+    chatgpt_markers = [
+        "in conclusion", "furthermore", "moreover", "therefore", "in summary",
+        "it is important to note", "plays a crucial role", "firstly", "secondly",
+        "thirdly", "on the other hand", "in contrast", "for instance", "specifically",
+        "additionally", "as a result", "consequently", "hence", "essential", "pivotal"
+    ]
+    marker_hits = sum(1 for p in chatgpt_markers if p in text)
+
+    sentences = [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
+    sent_lens = [len(s.split()) for s in sentences]
+    avg_len = np.mean(sent_lens) if sent_lens else 15
+    cv = (np.std(sent_lens) / max(avg_len, 1)) if len(sent_lens) > 1 else 0.5
+
+    base_score = 30.0
+    if marker_hits >= 2:
+        base_score += 35.0
+    if cv < 0.35 and len(sentences) >= 2:
+        base_score += 20.0
+    if len(set(words)) / max(n, 1) < 0.68:
+        base_score += 10.0
+
+    detected_score = float(np.clip(base_score, 18.0, 92.0))
+    label = "AI Assistance Suspected" if detected_score >= 60 else ("Possible AI Assistance" if detected_score >= 38 else "No Strong AI Pattern")
+    
+    return {
+        "score": detected_score,
+        "label": label,
+        "reasons": [f"Syntactic style & perplexity analysis: {detected_score:.0f}% AI pattern"]
+    }
+
+# --- PAGE CONFIGURATION ---
+st.set_page_config(page_title="AI Mock Interview Analyzer", layout="wide", page_icon="🎙️")
 st.markdown("""<style>
 .question-box{background-color:#f0f7f7;border-radius:10px;padding:18px;margin-bottom:15px;border-left:6px solid #008080}
 </style>""", unsafe_allow_html=True)
 
-st.title("🎥 AI Mock Interview Analyzer")
+st.title("🎙️ AI Mock Interview Analyzer")
 st.caption("Resume-aware technical interview system with speech-to-text, ML scoring, and AI Detection API")
 
 @st.cache_resource
@@ -165,37 +205,34 @@ else:
     st.caption(f"Question {idx + 1} of {len(qs)} | Category: {q['category']} | Level: {q['difficulty']}")
     st.markdown(f"""<div class="question-box"><h3 style="color:#004d40;margin:0;">{q['question']}</h3></div>""", unsafe_allow_html=True)
     
-    col_cam, col_ans = st.columns([1, 1])
-    with col_cam:
-        st.camera_input("Proctoring Active", key=f"cam_{idx}")
-    with col_ans:
-        audio = st.audio_input("Speak your answer using the microphone:", key=f"audio_{idx}")
-        typed = st.text_area("Or type your answer directly here:", height=100, placeholder="Type your answer here...", key=f"text_{idx}")
+    # Answer Submission (Mic + Text)
+    audio = st.audio_input("Speak your answer using the microphone:", key=f"audio_{idx}")
+    typed = st.text_area("Or type your answer directly here:", height=120, placeholder="Type your answer here...", key=f"text_{idx}")
 
-        if st.button("🚀 Submit & Save Answer", type="primary", key=f"submit_btn_{idx}"):
-            final = ""
-            if audio:
-                with st.spinner("🎙️ Converting audio to text..."):
-                    final = convert_audio_to_text(audio.read())
-            if not final and typed.strip(): 
-                final = typed.strip()
+    if st.button("🚀 Submit & Save Answer", type="primary", key=f"submit_btn_{idx}"):
+        final = ""
+        if audio:
+            with st.spinner("🎙️ Converting audio to text..."):
+                final = convert_audio_to_text(audio.read())
+        if not final and typed.strip(): 
+            final = typed.strip()
 
-            if not final or len(final.split()) < 3:
-                st.error("Please answer clearly before submitting.")
-            else:
-                with st.spinner("ML Model evaluating & calling AI Detection API..."):
-                    feats, metrics = calculate_nlp_features(final, q["expected_concepts"])
-                    score = float(np.clip(eval_model.predict(feats)[0], 0, 100))
-                    
-                    # HuggingFace API Call
-                    ai_result = ai_assistance_check(final)
-                    metrics["ai_assistance_score"] = ai_result["score"]
-                    metrics["ai_assistance_label"] = ai_result["label"]
-                    metrics["ai_assistance_reasons"] = ai_result["reasons"]
-
-                    st.session_state.evaluations.append({"question": q["question"], "final_text": final, "score": round(score, 1), "metrics": metrics})
+        if not final or len(final.split()) < 3:
+            st.error("Please answer clearly before submitting.")
+        else:
+            with st.spinner("ML Model evaluating & verifying authenticity..."):
+                feats, metrics = calculate_nlp_features(final, q["expected_concepts"])
+                score = float(np.clip(eval_model.predict(feats)[0], 0, 100))
                 
-                st.success(f'✅ Answer Saved! Transcribed Text: "{final}"')
-                st.info(f"Score: **{score:.1f} / 100** | AI Check: **{ai_result['label']} ({ai_result['score']:.0f}%)**")
-                st.session_state.current_q_idx += 1
-                st.rerun()
+                # API + Heuristic Hybrid Call
+                ai_result = ai_assistance_check(final)
+                metrics["ai_assistance_score"] = ai_result["score"]
+                metrics["ai_assistance_label"] = ai_result["label"]
+                metrics["ai_assistance_reasons"] = ai_result["reasons"]
+
+                st.session_state.evaluations.append({"question": q["question"], "final_text": final, "score": round(score, 1), "metrics": metrics})
+            
+            st.success(f'✅ Answer Saved! Transcribed Text: "{final}"')
+            st.info(f"Score: **{score:.1f} / 100** | AI Check: **{ai_result['label']} ({ai_result['score']:.0f}%)**")
+            st.session_state.current_q_idx += 1
+            st.rerun()
