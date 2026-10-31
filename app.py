@@ -10,6 +10,7 @@ import requests
 import os
 import speech_recognition as sr
 import streamlit.components.v1 as components
+import pathlib
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -82,99 +83,35 @@ def detect_ai_sapling(answer):
 
 
 # --- WINDOW SWITCH DETECTION ---
+# A small custom Streamlit component reports browser-tab visibility changes
+# back to Python, allowing the server-side session to enforce the 2-switch limit.
+_COMPONENT_DIR = pathlib.Path(__file__).parent / "window_switch_component"
+
+WINDOW_SWITCH_MONITOR = components.declare_component(
+    "window_switch_monitor",
+    path=str(_COMPONENT_DIR)
+)
+
+
 def detect_window_switch():
-    components.html(
-        """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body {
-                    margin: 0;
-                    padding: 0;
-                    font-family: Arial, sans-serif;
-                }
-
-                #switch-warning {
-                    display: none;
-                    background: #fff3cd;
-                    color: #856404;
-                    border: 1px solid #ffeeba;
-                    border-left: 5px solid #e0a800;
-                    border-radius: 8px;
-                    padding: 12px 16px;
-                    font-size: 14px;
-                    line-height: 1.5;
-                    box-sizing: border-box;
-                    width: 100%;
-                }
-
-                #switch-warning strong {
-                    display: block;
-                    margin-bottom: 4px;
-                    font-size: 15px;
-                }
-            </style>
-        </head>
-
-        <body>
-
-            <div id="switch-warning">
-                <strong>⚠️ Window Switch Detected!</strong>
-
-                You have left the interview window.
-                Please return to the interview and remain focused.
-
-                <div style="font-size:12px; margin-top:5px;">
-                    Warning only — no automatic disqualification.
-                </div>
-            </div>
-
-            <script>
-                const warning = document.getElementById("switch-warning");
-
-                let lastWarning = 0;
-                let hideTimer = null;
-
-                function showWarning() {
-                    const now = Date.now();
-
-                    // Prevent duplicate warnings
-                    if (now - lastWarning < 2500) {
-                        return;
-                    }
-
-                    lastWarning = now;
-
-                    warning.style.display = "block";
-
-                    clearTimeout(hideTimer);
-
-                    hideTimer = setTimeout(function() {
-                        warning.style.display = "none";
-                    }, 6000);
-                }
-
-                // Detect browser tab switching
-                document.addEventListener("visibilitychange", function() {
-                    if (document.hidden) {
-                        showWarning();
-                    }
-                });
-
-                // Detect window losing focus
-                window.addEventListener("blur", function() {
-                    showWarning();
-                });
-
-            </script>
-
-        </body>
-        </html>
-        """,
-        height=100,
-        scrolling=False
+    reported_count = WINDOW_SWITCH_MONITOR(
+        current_count=st.session_state.window_switch_count,
+        reset_token=st.session_state.interview_id,
+        key=f"window_switch_monitor_{st.session_state.interview_id}",
+        default=st.session_state.window_switch_count,
+        height=0
     )
+
+    if isinstance(reported_count, (int, float)):
+        st.session_state.window_switch_count = max(
+            st.session_state.window_switch_count,
+            int(reported_count)
+        )
+
+    if st.session_state.window_switch_count >= 2:
+        st.session_state.disqualified = True
+
+    return st.session_state.window_switch_count
 
 
 # --- PAGE CONFIGURATION ---
@@ -403,7 +340,10 @@ defaults = {
     "current_q_idx": 0,
     "selected_questions": [],
     "evaluations": [],
-    "profile": None
+    "profile": None,
+    "window_switch_count": 0,
+    "disqualified": False,
+    "interview_id": 0
 }
 
 for k, v in defaults.items():
@@ -492,6 +432,9 @@ if not st.session_state.interview_started:
             st.session_state.interview_started = True
             st.session_state.current_q_idx = 0
             st.session_state.evaluations = []
+            st.session_state.window_switch_count = 0
+            st.session_state.disqualified = False
+            st.session_state.interview_id += 1
 
             st.rerun()
 
@@ -505,6 +448,31 @@ else:
     qs = st.session_state.selected_questions
 
     idx = st.session_state.current_q_idx
+
+    # --- WINDOW SWITCH MONITORING ---
+    switch_count = detect_window_switch()
+
+    if st.session_state.disqualified:
+        st.error("🚫 INTERVIEW DISQUALIFIED")
+        st.title("Interview Cancelled!")
+        st.write(
+            "You have switched away from the interview window twice. "
+            "Your interview has been automatically terminated due to "
+            "violation of interview rules."
+        )
+        st.caption(
+            "The interview was cancelled after the second detected "
+            "browser-tab visibility change."
+        )
+        st.stop()
+
+    elif switch_count == 1:
+        st.warning(
+            "⚠️ Window Switch Detected! "
+            "You have left the interview window. "
+            "Please return to the interview and remain focused. "
+            "(1 of 2 allowed switches used.)"
+        )
 
 
     # --- FINAL SCORECARD ---
@@ -665,13 +633,6 @@ else:
             st.rerun()
 
         st.stop()
-
-
-    # =================================================
-    # WINDOW SWITCH MONITORING
-    # =================================================
-
-    detect_window_switch()
 
 
     # =================================================
